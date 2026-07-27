@@ -14,9 +14,11 @@
  *   POST /tool-usage           body: { id }
  *   GET  /popular-tools
  *   POST /visit                body: { article_id?, visitor_id? }
+ *   POST /heartbeat            body: { visitor_id }    — keeps session alive
+ *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.1-github";
+const WORKER_VERSION = "1.0.2-github";
 const DEPLOYED_AT = "2026-07-27";
 
 const CORS_HEADERS = {
@@ -71,6 +73,9 @@ function clean(value, maxLen) {
 }
 async function readJson(request) {
   try {
+    // Note: request.json() parses body as JSON regardless of Content-Type.
+    // sendBeacon() sends text/plain but we still parse JSON here so /leave
+    // works from both fetch(application/json) AND navigator.sendBeacon(text/plain).
     const data = await request.json();
     return data && typeof data === "object" ? data : {};
   } catch (e) { return null; }
@@ -251,6 +256,46 @@ async function postVisit(request, db) {
   }
 }
 
+// NEW (v1.0.2): heartbeat keeps a live session row fresh.
+// The client pings this every 15 seconds while the tab is visible.
+// The admin dashboard's Live Now query counts rows with last_seen within
+// the last 30 seconds — so if pings stop (tab hidden, closed, crashed),
+// the count naturally drops within 30 sec even if /leave never fires.
+async function postHeartbeat(request, db) {
+  const body = await readJson(request);
+  if (body === null) return errorResponse("Invalid JSON body", 400);
+  const visitorId = isNonEmptyString(body.visitor_id, MAX_VISITOR_ID_LEN)
+    ? clean(body.visitor_id, MAX_VISITOR_ID_LEN)
+    : null;
+  if (!visitorId) return errorResponse("Missing visitor_id", 400);
+  try {
+    await db.prepare(
+      `INSERT INTO active_sessions (visitor_id, last_seen) VALUES (?1, ?2)
+       ON CONFLICT(visitor_id) DO UPDATE SET last_seen = ?2`
+    ).bind(visitorId, Date.now()).run();
+    return jsonResponse({ success: true });
+  } catch (e) { return errorResponse("Heartbeat failed", 500); }
+}
+
+// NEW (v1.0.2): immediate offline signal, sent via navigator.sendBeacon()
+// on pagehide/beforeunload. Instantly deletes the session row so Live Now
+// drops within the next admin poll (~3 sec) instead of waiting for the
+// 30-second stale threshold.
+async function postLeave(request, db) {
+  const body = await readJson(request);
+  if (body === null) return errorResponse("Invalid JSON body", 400);
+  const visitorId = isNonEmptyString(body.visitor_id, MAX_VISITOR_ID_LEN)
+    ? clean(body.visitor_id, MAX_VISITOR_ID_LEN)
+    : null;
+  if (!visitorId) return errorResponse("Missing visitor_id", 400);
+  try {
+    await db.prepare(
+      `DELETE FROM active_sessions WHERE visitor_id = ?1`
+    ).bind(visitorId).run();
+    return jsonResponse({ success: true });
+  } catch (e) { return errorResponse("Leave failed", 500); }
+}
+
 function getVersion() {
   return jsonResponse({
     success: true,
@@ -285,6 +330,8 @@ export default {
       if (path === "/tool-usage" && method === "POST") return await postToolUsage(request, db);
       if (path === "/popular-tools" && method === "GET") return await getPopularTools(db);
       if (path === "/visit" && method === "POST") return await postVisit(request, db);
+      if (path === "/heartbeat" && method === "POST") return await postHeartbeat(request, db);
+      if (path === "/leave" && method === "POST") return await postLeave(request, db);
       return errorResponse("Not found", 404);
     } catch (e) { return errorResponse("Internal server error", 500); }
   }
