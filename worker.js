@@ -1,7 +1,9 @@
 /**
  * Fast Web Tools — Cloudflare Worker API
  * D1 binding name: DB
+ * Deployed from: github.com/FastWebTools/fastwebtools-api-worker
  *
+ *   GET  /version              (public, no auth)
  *   GET  /comments?article_id=xxx
  *   POST /comments             body: { article_id, name, text }
  *   GET  /article-likes?id=xxx
@@ -13,6 +15,9 @@
  *   GET  /popular-tools
  *   POST /visit                body: { article_id?, visitor_id? }
  */
+
+const WORKER_VERSION = "1.0.1-github";
+const DEPLOYED_AT = "2026-07-27";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -246,14 +251,29 @@ async function postVisit(request, db) {
   }
 }
 
+function getVersion() {
+  return jsonResponse({
+    success: true,
+    worker: "fastwebtools-api",
+    version: WORKER_VERSION,
+    deployed_at: DEPLOYED_AT,
+    source: "github.com/FastWebTools/fastwebtools-api-worker",
+    server_time: new Date().toISOString(),
+  });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return handleOptions();
-    const db = env.DB;
-    if (!db) return errorResponse("D1 binding 'DB' is not configured", 500);
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
+
+    // Public version endpoint (no DB needed)
+    if (path === "/version" && method === "GET") return getVersion();
+
+    const db = env.DB;
+    if (!db) return errorResponse("D1 binding 'DB' is not configured", 500);
     try {
       if (path === "/comments" && method === "GET") return await getComments(url, db);
       if (path === "/comments" && method === "POST") return await postComment(request, db);
