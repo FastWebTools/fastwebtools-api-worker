@@ -18,7 +18,7 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.2-github";
+const WORKER_VERSION = "1.0.3-github";
 const DEPLOYED_AT = "2026-07-27";
 
 const CORS_HEADERS = {
@@ -58,11 +58,18 @@ function sanitizeKey(value) {
 
 // Visit tracking preserves the FULL post URL so the dashboard can
 // display the real article name and link back to the exact post.
+//
+// v1.0.3: Strip query string (?m=1 from Blogger mobile, ?utm_*, etc.)
+// and hash BEFORE regex sanitize. Without this, ?m=1 becomes _m_1 and
+// the Popular Articles LIKE 'https://.../2%/%.html' query stops
+// matching mobile visits.
 function sanitizeVisitUrl(value) {
-  return String(value == null ? "" : value)
-    .trim()
-    .replace(/[^a-zA-Z0-9_\-\.:\/]/g, "_")
-    .slice(0, MAX_URL_LEN);
+  let raw = String(value == null ? "" : value).trim();
+  const qIdx = raw.indexOf("?");
+  if (qIdx !== -1) raw = raw.slice(0, qIdx);
+  const hIdx = raw.indexOf("#");
+  if (hIdx !== -1) raw = raw.slice(0, hIdx);
+  return raw.replace(/[^a-zA-Z0-9_\-\.:\/]/g, "_").slice(0, MAX_URL_LEN);
 }
 
 function isNonEmptyString(value, maxLen) {
@@ -256,7 +263,7 @@ async function postVisit(request, db) {
   }
 }
 
-// NEW (v1.0.2): heartbeat keeps a live session row fresh.
+// v1.0.2: heartbeat keeps a live session row fresh.
 // The client pings this every 15 seconds while the tab is visible.
 // The admin dashboard's Live Now query counts rows with last_seen within
 // the last 30 seconds — so if pings stop (tab hidden, closed, crashed),
@@ -277,7 +284,7 @@ async function postHeartbeat(request, db) {
   } catch (e) { return errorResponse("Heartbeat failed", 500); }
 }
 
-// NEW (v1.0.2): immediate offline signal, sent via navigator.sendBeacon()
+// v1.0.2: immediate offline signal, sent via navigator.sendBeacon()
 // on pagehide/beforeunload. Instantly deletes the session row so Live Now
 // drops within the next admin poll (~3 sec) instead of waiting for the
 // 30-second stale threshold.
