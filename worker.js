@@ -18,8 +18,8 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.3-github";
-const DEPLOYED_AT = "2026-07-27";
+const WORKER_VERSION = "1.0.4-github";
+const DEPLOYED_AT = "2026-08-01";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -60,9 +60,7 @@ function sanitizeKey(value) {
 // display the real article name and link back to the exact post.
 //
 // v1.0.3: Strip query string (?m=1 from Blogger mobile, ?utm_*, etc.)
-// and hash BEFORE regex sanitize. Without this, ?m=1 becomes _m_1 and
-// the Popular Articles LIKE 'https://.../2%/%.html' query stops
-// matching mobile visits.
+// and hash BEFORE regex sanitize.
 function sanitizeVisitUrl(value) {
   let raw = String(value == null ? "" : value).trim();
   const qIdx = raw.indexOf("?");
@@ -70,6 +68,45 @@ function sanitizeVisitUrl(value) {
   const hIdx = raw.indexOf("#");
   if (hIdx !== -1) raw = raw.slice(0, hIdx);
   return raw.replace(/[^a-zA-Z0-9_\-\.:\/]/g, "_").slice(0, MAX_URL_LEN);
+}
+
+// v1.0.4: canonicalize article URLs at ingest time so buggy tracking
+// variants (trailing -html, slug-as-path) never enter the DB.
+// Handles:
+//   /YYYY/MM/slug-html.html  ->  /YYYY/MM/slug.html
+//   /YYYY/MM/slug.html-html  ->  /YYYY/MM/slug.html
+//   /www-fastwebtools-online-YYYY-MM-slug-html  ->  /YYYY/MM/slug.html
+// Non-article URLs (homepage, /search, etc.) pass through unchanged.
+function canonicalizeVisitUrl(sanitized) {
+  if (!sanitized) return sanitized;
+  const s = String(sanitized);
+  const domainMatch = s.match(/^(https?:\/\/[^\/]+)(\/.*)?$/i);
+  let prefix = "", path = s;
+  if (domainMatch) {
+    prefix = domainMatch[1];
+    path = domainMatch[2] || "/";
+  }
+  // Fix 1: /YYYY/MM/slug[.html][-html]... -> canonical /YYYY/MM/slug.html
+  const m = path.match(/^\/(\d{4})\/(\d{1,2})\/(.+)$/i);
+  if (m) {
+    let slug = m[3], prev = "";
+    while (slug !== prev) {
+      prev = slug;
+      slug = slug.replace(/\.html?$/i, "").replace(/-html$/i, "");
+    }
+    if (slug) return prefix + "/" + m[1] + "/" + String(m[2]).padStart(2, "0") + "/" + slug + ".html";
+  }
+  // Fix 2: /www-fastwebtools-online-YYYY-MM-slug-html -> /YYYY/MM/slug.html
+  const m2 = path.match(/^\/?www-fastwebtools-online-(\d{4})-(\d{1,2})-(.+)$/i);
+  if (m2) {
+    let slug2 = m2[3], prev2 = "";
+    while (slug2 !== prev2) {
+      prev2 = slug2;
+      slug2 = slug2.replace(/\.html?$/i, "").replace(/-html$/i, "");
+    }
+    if (slug2) return prefix + "/" + m2[1] + "/" + String(m2[2]).padStart(2, "0") + "/" + slug2 + ".html";
+  }
+  return s;
 }
 
 function isNonEmptyString(value, maxLen) {
@@ -80,9 +117,6 @@ function clean(value, maxLen) {
 }
 async function readJson(request) {
   try {
-    // Note: request.json() parses body as JSON regardless of Content-Type.
-    // sendBeacon() sends text/plain but we still parse JSON here so /leave
-    // works from both fetch(application/json) AND navigator.sendBeacon(text/plain).
     const data = await request.json();
     return data && typeof data === "object" ? data : {};
   } catch (e) { return null; }
@@ -242,13 +276,15 @@ async function getPopularTools(db) {
   } catch (e) { return errorResponse("Failed to load popular tools", 500); }
 }
 
+// v1.0.4: applies canonicalizeVisitUrl() so buggy article URL variants
+// (trailing -html, slug-as-path) get normalized before INSERT.
 async function postVisit(request, db) {
   const body = await readJson(request);
   const safeBody = body === null ? {} : body;
   const rawArticleId = safeBody.article_id;
   const articleId =
     typeof rawArticleId === "string" && rawArticleId.trim().length > 0 && rawArticleId.length <= MAX_URL_LEN
-      ? sanitizeVisitUrl(rawArticleId)
+      ? canonicalizeVisitUrl(sanitizeVisitUrl(rawArticleId))
       : null;
   const visitorId = isNonEmptyString(safeBody.visitor_id, MAX_VISITOR_ID_LEN)
     ? clean(safeBody.visitor_id, MAX_VISITOR_ID_LEN)
@@ -263,11 +299,6 @@ async function postVisit(request, db) {
   }
 }
 
-// v1.0.2: heartbeat keeps a live session row fresh.
-// The client pings this every 15 seconds while the tab is visible.
-// The admin dashboard's Live Now query counts rows with last_seen within
-// the last 30 seconds — so if pings stop (tab hidden, closed, crashed),
-// the count naturally drops within 30 sec even if /leave never fires.
 async function postHeartbeat(request, db) {
   const body = await readJson(request);
   if (body === null) return errorResponse("Invalid JSON body", 400);
@@ -284,10 +315,6 @@ async function postHeartbeat(request, db) {
   } catch (e) { return errorResponse("Heartbeat failed", 500); }
 }
 
-// v1.0.2: immediate offline signal, sent via navigator.sendBeacon()
-// on pagehide/beforeunload. Instantly deletes the session row so Live Now
-// drops within the next admin poll (~3 sec) instead of waiting for the
-// 30-second stale threshold.
 async function postLeave(request, db) {
   const body = await readJson(request);
   if (body === null) return errorResponse("Invalid JSON body", 400);
@@ -321,7 +348,6 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
 
-    // Public version endpoint (no DB needed)
     if (path === "/version" && method === "GET") return getVersion();
 
     const db = env.DB;
