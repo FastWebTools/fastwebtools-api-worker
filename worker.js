@@ -18,8 +18,13 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.5-github";
+const WORKER_VERSION = "1.0.6-github";
 const DEPLOYED_AT = "2026-08-01";
+
+// v1.0.6: session dedupe window. If the same visitor_id had a visit within
+// this many milliseconds, additional page loads are treated as the same
+// session and do NOT create a new row in `visits`.
+const VISIT_SESSION_MS = 30 * 60 * 1000; // 30 minutes
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -56,6 +61,17 @@ async function ensureEventTables(db) {
       db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_tool ON tool_like_events(tool_id)")
     ]);
     eventTablesInit = true;
+  } catch (e) { /* best-effort; retry on next request */ }
+}
+
+// v1.0.6: index on visits(visitor_id) speeds up the session-dedupe lookup.
+// Idempotent — runs once per worker instance.
+let visitsIndexInit = false;
+async function ensureVisitsIndex(db) {
+  if (visitsIndexInit) return;
+  try {
+    await db.prepare("CREATE INDEX IF NOT EXISTS idx_visits_visitor ON visits(visitor_id, created_at)").run();
+    visitsIndexInit = true;
   } catch (e) { /* best-effort; retry on next request */ }
 }
 
@@ -301,6 +317,11 @@ async function getPopularTools(db) {
 
 // v1.0.4: applies canonicalizeVisitUrl() so buggy article URL variants
 // (trailing -html, slug-as-path) get normalized before INSERT.
+// v1.0.6: session-based dedupe. If the same visitor_id had a visit within
+// VISIT_SESSION_MS (30 min), additional page loads are treated as the same
+// session and do NOT create a new row in `visits`. This makes "Total Visits"
+// count unique sessions instead of raw page loads. New session starts only
+// after 30 min of inactivity.
 async function postVisit(request, db) {
   const body = await readJson(request);
   const safeBody = body === null ? {} : body;
@@ -312,10 +333,25 @@ async function postVisit(request, db) {
   const visitorId = isNonEmptyString(safeBody.visitor_id, MAX_VISITOR_ID_LEN)
     ? clean(safeBody.visitor_id, MAX_VISITOR_ID_LEN)
     : null;
+  const now = Date.now();
   try {
+    await ensureVisitsIndex(db);
+    // Session dedupe: if this visitor already had a visit within the last
+    // 30 minutes, skip inserting. Only applies when visitor_id is present.
+    if (visitorId) {
+      try {
+        const last = await db.prepare(
+          `SELECT MAX(created_at) AS last_ts FROM visits WHERE visitor_id = ?1`
+        ).bind(visitorId).first();
+        const lastTs = last && typeof last.last_ts === "number" ? last.last_ts : 0;
+        if (lastTs && (now - lastTs) < VISIT_SESSION_MS) {
+          return jsonResponse({ success: true, deduped: true });
+        }
+      } catch (e) { /* fall through and insert */ }
+    }
     await db.prepare(
       `INSERT INTO visits (article_id, visitor_id, created_at) VALUES (?1, ?2, ?3)`
-    ).bind(articleId, visitorId, Date.now()).run();
+    ).bind(articleId, visitorId, now).run();
     return jsonResponse({ success: true });
   } catch (e) {
     return jsonResponse({ success: false, error: "Failed to record visit" }, 500);
