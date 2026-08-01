@@ -1,4 +1,5 @@
 {
+  // Deploy trigger: 2026-08-01 v1.0.4 (canonicalize visit URLs at ingest)
   "name": "fastwebtools-api",
   "main": "worker.js",
   "compatibility_date": "2026-07-23",
