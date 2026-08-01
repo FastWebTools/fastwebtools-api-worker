@@ -18,7 +18,7 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.4-github";
+const WORKER_VERSION = "1.0.5-github";
 const DEPLOYED_AT = "2026-08-01";
 
 const CORS_HEADERS = {
@@ -39,6 +39,24 @@ function errorResponse(message, status = 400) {
 }
 function handleOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+// v1.0.5: event log tables for date-filterable tool analytics.
+// Idempotent — runs once per worker instance.
+let eventTablesInit = false;
+async function ensureEventTables(db) {
+  if (eventTablesInit) return;
+  try {
+    await db.batch([
+      db.prepare("CREATE TABLE IF NOT EXISTS tool_usage_events (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_id TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_tue_created ON tool_usage_events(created_at)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_tue_tool ON tool_usage_events(tool_id)"),
+      db.prepare("CREATE TABLE IF NOT EXISTS tool_like_events (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_id TEXT NOT NULL, delta INTEGER NOT NULL, created_at INTEGER NOT NULL)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_created ON tool_like_events(created_at)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_tool ON tool_like_events(tool_id)")
+    ]);
+    eventTablesInit = true;
+  } catch (e) { /* best-effort; retry on next request */ }
 }
 
 const MAX_ID_LEN = 150;
@@ -72,11 +90,6 @@ function sanitizeVisitUrl(value) {
 
 // v1.0.4: canonicalize article URLs at ingest time so buggy tracking
 // variants (trailing -html, slug-as-path) never enter the DB.
-// Handles:
-//   /YYYY/MM/slug-html.html  ->  /YYYY/MM/slug.html
-//   /YYYY/MM/slug.html-html  ->  /YYYY/MM/slug.html
-//   /www-fastwebtools-online-YYYY-MM-slug-html  ->  /YYYY/MM/slug.html
-// Non-article URLs (homepage, /search, etc.) pass through unchanged.
 function canonicalizeVisitUrl(sanitized) {
   if (!sanitized) return sanitized;
   const s = String(sanitized);
@@ -86,7 +99,6 @@ function canonicalizeVisitUrl(sanitized) {
     prefix = domainMatch[1];
     path = domainMatch[2] || "/";
   }
-  // Fix 1: /YYYY/MM/slug[.html][-html]... -> canonical /YYYY/MM/slug.html
   const m = path.match(/^\/(\d{4})\/(\d{1,2})\/(.+)$/i);
   if (m) {
     let slug = m[3], prev = "";
@@ -96,7 +108,6 @@ function canonicalizeVisitUrl(sanitized) {
     }
     if (slug) return prefix + "/" + m[1] + "/" + String(m[2]).padStart(2, "0") + "/" + slug + ".html";
   }
-  // Fix 2: /www-fastwebtools-online-YYYY-MM-slug-html -> /YYYY/MM/slug.html
   const m2 = path.match(/^\/?www-fastwebtools-online-(\d{4})-(\d{1,2})-(.+)$/i);
   if (m2) {
     let slug2 = m2[3], prev2 = "";
@@ -227,6 +238,8 @@ async function getToolLikes(url, db) {
     return jsonResponse({ success: true, count });
   } catch (e) { return errorResponse("Failed to load tool likes", 500); }
 }
+
+// v1.0.5: also inserts into tool_like_events for date-filtered analytics.
 async function postToolLike(request, db) {
   const body = await readJson(request);
   if (body === null) return errorResponse("Invalid JSON body", 400);
@@ -237,7 +250,11 @@ async function postToolLike(request, db) {
   const id = sanitizeKey(rawId);
   const delta = action === "like" ? 1 : -1;
   try {
+    await ensureEventTables(db);
     const count = await adjustCounterRow(db, "tool_likes", "tool_id", "likes", id, delta);
+    try {
+      await db.prepare("INSERT INTO tool_like_events (tool_id, delta, created_at) VALUES (?1, ?2, ?3)").bind(id, delta, Date.now()).run();
+    } catch (e) { /* event log is best-effort */ }
     return jsonResponse({ success: true, count });
   } catch (e) { return errorResponse("Failed to update tool like", 500); }
 }
@@ -251,6 +268,8 @@ async function getToolUsage(url, db) {
     return jsonResponse({ success: true, count });
   } catch (e) { return errorResponse("Failed to load tool usage", 500); }
 }
+
+// v1.0.5: also inserts into tool_usage_events for date-filtered analytics.
 async function postToolUsage(request, db) {
   const body = await readJson(request);
   if (body === null) return errorResponse("Invalid JSON body", 400);
@@ -258,7 +277,11 @@ async function postToolUsage(request, db) {
   if (!isNonEmptyString(rawId, MAX_ID_LEN)) return errorResponse("Missing or invalid id", 400);
   const id = sanitizeKey(rawId);
   try {
+    await ensureEventTables(db);
     const count = await adjustCounterRow(db, "tool_usage", "tool_id", "uses", id, 1);
+    try {
+      await db.prepare("INSERT INTO tool_usage_events (tool_id, created_at) VALUES (?1, ?2)").bind(id, Date.now()).run();
+    } catch (e) { /* event log is best-effort */ }
     return jsonResponse({ success: true, count });
   } catch (e) { return errorResponse("Failed to update tool usage", 500); }
 }
