@@ -18,7 +18,7 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.0.6-github";
+const WORKER_VERSION = "1.1.0-github";
 const DEPLOYED_AT = "2026-08-01";
 
 // v1.0.6: session dedupe window. If the same visitor_id had a visit within
@@ -58,7 +58,10 @@ async function ensureEventTables(db) {
       db.prepare("CREATE INDEX IF NOT EXISTS idx_tue_tool ON tool_usage_events(tool_id)"),
       db.prepare("CREATE TABLE IF NOT EXISTS tool_like_events (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_id TEXT NOT NULL, delta INTEGER NOT NULL, created_at INTEGER NOT NULL)"),
       db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_created ON tool_like_events(created_at)"),
-      db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_tool ON tool_like_events(tool_id)")
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_tle_tool ON tool_like_events(tool_id)"),
+      db.prepare("CREATE TABLE IF NOT EXISTS article_like_events (id INTEGER PRIMARY KEY AUTOINCREMENT, article_id TEXT NOT NULL, delta INTEGER NOT NULL, created_at INTEGER NOT NULL)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_ale_created ON article_like_events(created_at)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_ale_article ON article_like_events(article_id)")
     ]);
     eventTablesInit = true;
   } catch (e) { /* best-effort; retry on next request */ }
@@ -70,7 +73,7 @@ let visitsIndexInit = false;
 async function ensureVisitsIndex(db) {
   if (visitsIndexInit) return;
   try {
-    await db.prepare("CREATE INDEX IF NOT EXISTS idx_visits_visitor ON visits(visitor_id, created_at)").run();
+    await db.prepare("CREATE INDEX IF NOT EXISTS idx_visits_visitor_page ON visits(visitor_id, article_id, created_at)").run();
     visitsIndexInit = true;
   } catch (e) { /* best-effort; retry on next request */ }
 }
@@ -240,7 +243,11 @@ async function postArticleLike(request, db) {
   const id = sanitizeKey(rawId);
   const delta = action === "like" ? 1 : -1;
   try {
+    await ensureEventTables(db);
     const count = await adjustCounterRow(db, "article_likes", "article_id", "likes", id, delta);
+    try {
+      await db.prepare("INSERT INTO article_like_events (article_id, delta, created_at) VALUES (?1, ?2, ?3)").bind(id, delta, Date.now()).run();
+    } catch (e) { /* event log is best-effort */ }
     return jsonResponse({ success: true, count });
   } catch (e) { return errorResponse("Failed to update article like", 500); }
 }
@@ -317,11 +324,9 @@ async function getPopularTools(db) {
 
 // v1.0.4: applies canonicalizeVisitUrl() so buggy article URL variants
 // (trailing -html, slug-as-path) get normalized before INSERT.
-// v1.0.6: session-based dedupe. If the same visitor_id had a visit within
-// VISIT_SESSION_MS (30 min), additional page loads are treated as the same
-// session and do NOT create a new row in `visits`. This makes "Total Visits"
-// count unique sessions instead of raw page loads. New session starts only
-// after 30 min of inactivity.
+// v1.1.0: dedupe repeat loads of the SAME page for the same visitor within
+// VISIT_SESSION_MS (30 min). Different pages are always recorded, so blog and
+// tool navigation is not lost while refresh noise remains controlled.
 async function postVisit(request, db) {
   const body = await readJson(request);
   const safeBody = body === null ? {} : body;
@@ -336,13 +341,14 @@ async function postVisit(request, db) {
   const now = Date.now();
   try {
     await ensureVisitsIndex(db);
-    // Session dedupe: if this visitor already had a visit within the last
-    // 30 minutes, skip inserting. Only applies when visitor_id is present.
+    // Page-aware dedupe: skip only when the same visitor loaded the same page
+    // within 30 minutes. A different page must create a new visit row.
     if (visitorId) {
       try {
         const last = await db.prepare(
-          `SELECT MAX(created_at) AS last_ts FROM visits WHERE visitor_id = ?1`
-        ).bind(visitorId).first();
+          `SELECT MAX(created_at) AS last_ts FROM visits
+           WHERE visitor_id = ?1 AND COALESCE(article_id, '') = COALESCE(?2, '')`
+        ).bind(visitorId, articleId).first();
         const lastTs = last && typeof last.last_ts === "number" ? last.last_ts : 0;
         if (lastTs && (now - lastTs) < VISIT_SESSION_MS) {
           return jsonResponse({ success: true, deduped: true });
