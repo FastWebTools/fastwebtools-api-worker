@@ -329,7 +329,7 @@ async function deleteOwnComment(request, db, id) {
   try {
     await ensureCommentSchema(db); const row=await db.prepare("SELECT owner_token_hash FROM comments WHERE id=?1").bind(id).first();
     if(!row) return errorResponse("Comment not found",404); if(await sha256Hex(body.owner_token)!==row.owner_token_hash) return errorResponse("You do not own this comment",403);
-    await db.batch([db.prepare("DELETE FROM reply_reactions WHERE reply_id IN (SELECT id FROM comment_replies WHERE comment_id=?1)").bind(id),db.prepare("DELETE FROM comment_reactions WHERE comment_id=?1").bind(id),db.prepare("DELETE FROM comment_replies WHERE comment_id=?1").bind(id),db.prepare("DELETE FROM comments WHERE id=?1").bind(id)]);
+    await db.batch([db.prepare("DELETE FROM comment_reports WHERE comment_id=?1").bind(id),db.prepare("DELETE FROM reply_reactions WHERE reply_id IN (SELECT id FROM comment_replies WHERE comment_id=?1)").bind(id),db.prepare("DELETE FROM comment_reactions WHERE comment_id=?1").bind(id),db.prepare("DELETE FROM comment_replies WHERE comment_id=?1").bind(id),db.prepare("DELETE FROM comments WHERE id=?1").bind(id)]);
     return jsonResponse({success:true,deleted:true});
   } catch(e){ return errorResponse("Failed to delete comment",500); }
 }
