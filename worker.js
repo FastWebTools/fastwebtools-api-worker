@@ -18,7 +18,7 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.2.0-github";
+const WORKER_VERSION = "1.2.1-github";
 const DEPLOYED_AT = "2026-09-29";
 
 // v1.0.6: session dedupe window. If the same visitor_id had a visit within
@@ -227,6 +227,7 @@ async function getComments(url, db) {
        ORDER BY c.id DESC LIMIT 100`
     ).bind(articleId, visitorId || "-").all();
     const rows = result && result.results ? result.results : [];
+    rows.sort((a,b) => (createdMs(b.created_at)-createdMs(a.created_at)) || (Number(b.id)-Number(a.id)));
     const ids = rows.map(r => Number(r.id)).filter(Boolean);
     let replies = [];
     if (ids.length) {
@@ -243,12 +244,13 @@ async function getComments(url, db) {
     const byComment = {};
     for (const r of replies) {
       const key = String(r.comment_id); if (!byComment[key]) byComment[key] = [];
-      byComment[key].push({ id:Number(r.id), text:r.body||"", date:toDisplayDate(r.created_at), created_at:r.created_at, official:!!r.is_official, likes:Number(r.likes||0), dislikes:Number(r.dislikes||0), my_reaction:Number(r.my_reaction||0) });
+      const replyMs=createdMs(r.created_at);
+      byComment[key].push({ id:Number(r.id), text:r.body||"", date:replyMs?formatDate(new Date(replyMs)):toDisplayDate(r.created_at), created_at:replyMs?new Date(replyMs).toISOString():r.created_at, created_at_raw:r.created_at, created_at_ms:replyMs, official:!!r.is_official, likes:Number(r.likes||0), dislikes:Number(r.dislikes||0), my_reaction:Number(r.my_reaction||0) });
     }
     const now = Date.now();
     const comments = rows.map(row => {
       const ms = createdMs(row.created_at);
-      return { id:Number(row.id), name:row.name||"Guest", text:row.comment||"", date:toDisplayDate(row.created_at), created_at:row.created_at, created_at_ms:ms, edited_once:!!row.edited_once, edited_at:row.edited_at||null, edited_by_admin:!!row.edited_by_admin, admin_edit_reason:row.admin_edit_reason||"", edit_deadline_ms:ms?ms+COMMENT_EDIT_WINDOW_MS:0, edit_window_open:!!ms && now < ms+COMMENT_EDIT_WINDOW_MS && !row.edited_once, likes:Number(row.likes||0), dislikes:Number(row.dislikes||0), my_reaction:Number(row.my_reaction||0), replies:byComment[String(row.id)]||[] };
+      return { id:Number(row.id), name:row.name||"Guest", text:row.comment||"", date:ms?formatDate(new Date(ms)):toDisplayDate(row.created_at), created_at:ms?new Date(ms).toISOString():row.created_at, created_at_raw:row.created_at, created_at_ms:ms, edited_once:!!Number(row.edited_once), edited_at:row.edited_at||null, edited_by_admin:!!Number(row.edited_by_admin), admin_edit_reason:row.admin_edit_reason||"", edit_deadline_ms:ms?ms+COMMENT_EDIT_WINDOW_MS:0, edit_window_open:!!ms && now < ms+COMMENT_EDIT_WINDOW_MS && !Number(row.edited_once), likes:Number(row.likes||0), dislikes:Number(row.dislikes||0), my_reaction:Number(row.my_reaction||0), replies:(byComment[String(row.id)]||[]).sort((a,b)=>(a.created_at_ms-b.created_at_ms)||(a.id-b.id)) };
     });
     return jsonResponse({ success:true, count:Number(countRow && countRow.n || 0), comments, server_time:now, poll_after_ms:10000 });
   } catch (e) { return errorResponse("Failed to load comments", 500); }
