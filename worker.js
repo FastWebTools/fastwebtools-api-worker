@@ -18,7 +18,7 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.2.1-github";
+const WORKER_VERSION = "1.3.0-github";
 const DEPLOYED_AT = "2026-09-29";
 
 // v1.0.6: session dedupe window. If the same visitor_id had a visit within
@@ -94,7 +94,11 @@ async function ensureCommentSchema(db) {
   await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS comment_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, visitor_id TEXT NOT NULL, reaction INTEGER NOT NULL CHECK(reaction IN (-1,1)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(comment_id, visitor_id))");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_cr_comment ON comment_reactions(comment_id)");
   await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS comment_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'published', is_official INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
+  await bestEffortRun(db, "ALTER TABLE comment_replies ADD COLUMN name TEXT");
+  await bestEffortRun(db, "ALTER TABLE comment_replies ADD COLUMN owner_token_hash TEXT");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_reply_comment ON comment_replies(comment_id)");
+  await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS comment_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, visitor_id TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, UNIQUE(comment_id, visitor_id))");
+  await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_report_comment ON comment_reports(comment_id)");
   await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS reply_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, reply_id INTEGER NOT NULL, visitor_id TEXT NOT NULL, reaction INTEGER NOT NULL CHECK(reaction IN (-1,1)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(reply_id, visitor_id))");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_rr_reply ON reply_reactions(reply_id)");
   commentSchemaInit = true;
@@ -233,7 +237,7 @@ async function getComments(url, db) {
     if (ids.length) {
       const qs = ids.map(() => "?").join(",");
       const rr = await db.prepare(
-        `SELECT p.id,p.comment_id,p.body,p.is_official,p.created_at,p.updated_at,
+        `SELECT p.id,p.comment_id,p.name,p.body,p.is_official,p.created_at,p.updated_at,
          COALESCE((SELECT SUM(CASE WHEN reaction=1 THEN 1 ELSE 0 END) FROM reply_reactions x WHERE x.reply_id=p.id),0) AS likes,
          COALESCE((SELECT SUM(CASE WHEN reaction=-1 THEN 1 ELSE 0 END) FROM reply_reactions x WHERE x.reply_id=p.id),0) AS dislikes,
          COALESCE((SELECT reaction FROM reply_reactions x WHERE x.reply_id=p.id AND x.visitor_id=?),0) AS my_reaction
@@ -245,7 +249,7 @@ async function getComments(url, db) {
     for (const r of replies) {
       const key = String(r.comment_id); if (!byComment[key]) byComment[key] = [];
       const replyMs=createdMs(r.created_at);
-      byComment[key].push({ id:Number(r.id), text:r.body||"", date:replyMs?formatDate(new Date(replyMs)):toDisplayDate(r.created_at), created_at:replyMs?new Date(replyMs).toISOString():r.created_at, created_at_raw:r.created_at, created_at_ms:replyMs, official:!!r.is_official, likes:Number(r.likes||0), dislikes:Number(r.dislikes||0), my_reaction:Number(r.my_reaction||0) });
+      byComment[key].push({ id:Number(r.id), name:Number(r.is_official)?"Fast Web Tools":(r.name||"Guest"), text:r.body||"", date:replyMs?formatDate(new Date(replyMs)):toDisplayDate(r.created_at), created_at:replyMs?new Date(replyMs).toISOString():r.created_at, created_at_raw:r.created_at, created_at_ms:replyMs, official:!!r.is_official, likes:Number(r.likes||0), dislikes:Number(r.dislikes||0), my_reaction:Number(r.my_reaction||0) });
     }
     const now = Date.now();
     const comments = rows.map(row => {
@@ -266,8 +270,9 @@ async function postComment(request, db) {
   if (body === null) return errorResponse("Invalid JSON body", 400);
   const rawArticleId=body.article_id, rawName=body.name, rawText=body.text;
   if (!isNonEmptyString(rawArticleId,MAX_ID_LEN)) return errorResponse("Missing or invalid article_id",400);
+  if (!isNonEmptyString(rawName,MAX_NAME_LEN)) return errorResponse("Name is required (max 40 characters)",400);
   if (!isNonEmptyString(rawText,MAX_TEXT_LEN)) return errorResponse("Comment text is required (max 400 characters)",400);
-  const articleId=sanitizeKey(rawArticleId), name=clean(rawName,MAX_NAME_LEN)||"Guest", text=clean(rawText,MAX_TEXT_LEN), now=Date.now();
+  const articleId=sanitizeKey(rawArticleId), name=clean(rawName,MAX_NAME_LEN), text=clean(rawText,MAX_TEXT_LEN), now=Date.now();
   const ownerToken=randomOwnerToken(), ownerHash=await sha256Hex(ownerToken);
   try {
     await ensureCommentSchema(db);
@@ -275,6 +280,34 @@ async function postComment(request, db) {
     const id=Number(r && r.meta && r.meta.last_row_id || 0);
     return jsonResponse({success:true,comment:{id,name,text,date:formatDate(new Date(now)),created_at:now,created_at_ms:now,edit_deadline_ms:now+COMMENT_EDIT_WINDOW_MS,edited_once:false,likes:0,dislikes:0,replies:[]},owner_token:ownerToken});
   } catch(e){ return errorResponse("Failed to save comment",500); }
+}
+
+async function postUserReply(request, db, commentId) {
+  const body=await readJson(request); if(body===null) return errorResponse("Invalid JSON body",400);
+  if(!isNonEmptyString(body.name,MAX_NAME_LEN)) return errorResponse("Name is required (max 40 characters)",400);
+  if(!isNonEmptyString(body.text,MAX_TEXT_LEN)) return errorResponse("Reply text is required (max 400 characters)",400);
+  const name=clean(body.name,MAX_NAME_LEN),text=clean(body.text,MAX_TEXT_LEN),now=Date.now(),ownerToken=randomOwnerToken(),ownerHash=await sha256Hex(ownerToken);
+  try {
+    await ensureCommentSchema(db);
+    const parent=await db.prepare("SELECT id FROM comments WHERE id=?1 AND (status='published' OR status IS NULL)").bind(commentId).first();
+    if(!parent) return errorResponse("Comment not found",404);
+    const r=await db.prepare("INSERT INTO comment_replies (comment_id,name,body,status,is_official,created_at,updated_at,owner_token_hash) VALUES (?1,?2,?3,'published',0,?4,?4,?5)").bind(commentId,name,text,now,ownerHash).run();
+    const id=Number(r&&r.meta&&r.meta.last_row_id||0);
+    return jsonResponse({success:true,reply:{id,comment_id:commentId,name,text,official:false,created_at:now,created_at_ms:now,likes:0,dislikes:0,my_reaction:0},owner_token:ownerToken});
+  } catch(e){ return errorResponse("Failed to save reply",500); }
+}
+
+async function reportComment(request, db, commentId) {
+  const body=await readJson(request); if(body===null) return errorResponse("Invalid JSON body",400);
+  const visitorId=clean(body.visitor_id,MAX_VISITOR_ID_LEN),reason=clean(body.reason,120)||"Other";
+  if(!visitorId) return errorResponse("Missing visitor_id",400);
+  try {
+    await ensureCommentSchema(db);
+    const parent=await db.prepare("SELECT id FROM comments WHERE id=?1").bind(commentId).first();
+    if(!parent) return errorResponse("Comment not found",404);
+    await db.prepare("INSERT INTO comment_reports (comment_id,visitor_id,reason,status,created_at) VALUES (?1,?2,?3,'pending',?4) ON CONFLICT(comment_id,visitor_id) DO UPDATE SET reason=?3,status='pending',created_at=?4").bind(commentId,visitorId,reason,Date.now()).run();
+    return jsonResponse({success:true,reported:true});
+  } catch(e){ return errorResponse("Failed to submit report",500); }
 }
 
 async function editOwnComment(request, db, id) {
@@ -513,6 +546,10 @@ export default {
       if (path === "/comments" && method === "GET") return await getComments(url, db);
       if (path === "/comments/count" && method === "GET") return await getCommentCount(url, db);
       if (path === "/comments" && method === "POST") return await postComment(request, db);
+      const userReply = path.match(/^\/comments\/(\d+)\/replies$/);
+      if (userReply && method === "POST") return await postUserReply(request, db, Number(userReply[1]));
+      const commentReport = path.match(/^\/comments\/(\d+)\/report$/);
+      if (commentReport && method === "POST") return await reportComment(request, db, Number(commentReport[1]));
       const ownComment = path.match(/^\/comments\/(\d+)$/);
       if (ownComment && method === "PUT") return await editOwnComment(request, db, Number(ownComment[1]));
       if (ownComment && method === "DELETE") return await deleteOwnComment(request, db, Number(ownComment[1]));
