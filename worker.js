@@ -18,8 +18,8 @@
  *   POST /leave                body: { visitor_id }    — immediate offline signal (sendBeacon)
  */
 
-const WORKER_VERSION = "1.3.0-github";
-const DEPLOYED_AT = "2026-09-29";
+const WORKER_VERSION = "1.4.0-github";
+const DEPLOYED_AT = "2026-09-30";
 
 // v1.0.6: session dedupe window. If the same visitor_id had a visit within
 // this many milliseconds, additional page loads are treated as the same
@@ -98,6 +98,9 @@ async function ensureCommentSchema(db) {
   await bestEffortRun(db, "ALTER TABLE comment_replies ADD COLUMN owner_token_hash TEXT");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_reply_comment ON comment_replies(comment_id)");
   await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS comment_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, visitor_id TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, UNIQUE(comment_id, visitor_id))");
+  await bestEffortRun(db, "ALTER TABLE comment_reports ADD COLUMN details TEXT");
+  await bestEffortRun(db, "ALTER TABLE comment_reports ADD COLUMN reviewed_at INTEGER");
+  await bestEffortRun(db, "ALTER TABLE comment_reports ADD COLUMN reviewed_by TEXT");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_report_comment ON comment_reports(comment_id)");
   await bestEffortRun(db, "CREATE TABLE IF NOT EXISTS reply_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, reply_id INTEGER NOT NULL, visitor_id TEXT NOT NULL, reaction INTEGER NOT NULL CHECK(reaction IN (-1,1)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(reply_id, visitor_id))");
   await bestEffortRun(db, "CREATE INDEX IF NOT EXISTS idx_rr_reply ON reply_reactions(reply_id)");
@@ -241,7 +244,7 @@ async function getComments(url, db) {
          COALESCE((SELECT SUM(CASE WHEN reaction=1 THEN 1 ELSE 0 END) FROM reply_reactions x WHERE x.reply_id=p.id),0) AS likes,
          COALESCE((SELECT SUM(CASE WHEN reaction=-1 THEN 1 ELSE 0 END) FROM reply_reactions x WHERE x.reply_id=p.id),0) AS dislikes,
          COALESCE((SELECT reaction FROM reply_reactions x WHERE x.reply_id=p.id AND x.visitor_id=?),0) AS my_reaction
-         FROM comment_replies p WHERE p.status='published' AND p.comment_id IN (${qs}) ORDER BY p.id ASC`
+         FROM comment_replies p WHERE p.status='published' AND p.is_official=1 AND p.comment_id IN (${qs}) ORDER BY p.id ASC`
       ).bind(visitorId || "-", ...ids).all();
       replies = rr && rr.results ? rr.results : [];
     }
@@ -283,29 +286,23 @@ async function postComment(request, db) {
 }
 
 async function postUserReply(request, db, commentId) {
-  const body=await readJson(request); if(body===null) return errorResponse("Invalid JSON body",400);
-  if(!isNonEmptyString(body.name,MAX_NAME_LEN)) return errorResponse("Name is required (max 40 characters)",400);
-  if(!isNonEmptyString(body.text,MAX_TEXT_LEN)) return errorResponse("Reply text is required (max 400 characters)",400);
-  const name=clean(body.name,MAX_NAME_LEN),text=clean(body.text,MAX_TEXT_LEN),now=Date.now(),ownerToken=randomOwnerToken(),ownerHash=await sha256Hex(ownerToken);
-  try {
-    await ensureCommentSchema(db);
-    const parent=await db.prepare("SELECT id FROM comments WHERE id=?1 AND (status='published' OR status IS NULL)").bind(commentId).first();
-    if(!parent) return errorResponse("Comment not found",404);
-    const r=await db.prepare("INSERT INTO comment_replies (comment_id,name,body,status,is_official,created_at,updated_at,owner_token_hash) VALUES (?1,?2,?3,'published',0,?4,?4,?5)").bind(commentId,name,text,now,ownerHash).run();
-    const id=Number(r&&r.meta&&r.meta.last_row_id||0);
-    return jsonResponse({success:true,reply:{id,comment_id:commentId,name,text,official:false,created_at:now,created_at_ms:now,likes:0,dislikes:0,my_reaction:0},owner_token:ownerToken});
-  } catch(e){ return errorResponse("Failed to save reply",500); }
+  return errorResponse("Public replies are disabled. Only the Fast Web Tools admin can reply.", 403);
 }
 
 async function reportComment(request, db, commentId) {
   const body=await readJson(request); if(body===null) return errorResponse("Invalid JSON body",400);
-  const visitorId=clean(body.visitor_id,MAX_VISITOR_ID_LEN),reason=clean(body.reason,120)||"Other";
+  const visitorId=clean(body.visitor_id,MAX_VISITOR_ID_LEN);
+  const allowed=["Spam or advertising","Harassment or abusive content","Personal information","False or misleading information","Other"];
+  const requested=clean(body.reason,80)||"Other";
+  const reason=allowed.includes(requested)?requested:"Other";
+  const details=clean(body.details||body.custom_reason,1000);
   if(!visitorId) return errorResponse("Missing visitor_id",400);
+  if(reason==="Other"&&!details) return errorResponse("Please describe why you are reporting this comment",400);
   try {
     await ensureCommentSchema(db);
     const parent=await db.prepare("SELECT id FROM comments WHERE id=?1").bind(commentId).first();
     if(!parent) return errorResponse("Comment not found",404);
-    await db.prepare("INSERT INTO comment_reports (comment_id,visitor_id,reason,status,created_at) VALUES (?1,?2,?3,'pending',?4) ON CONFLICT(comment_id,visitor_id) DO UPDATE SET reason=?3,status='pending',created_at=?4").bind(commentId,visitorId,reason,Date.now()).run();
+    await db.prepare("INSERT INTO comment_reports (comment_id,visitor_id,reason,details,status,created_at,reviewed_at,reviewed_by) VALUES (?1,?2,?3,?4,'pending',?5,NULL,NULL) ON CONFLICT(comment_id,visitor_id) DO UPDATE SET reason=?3,details=?4,status='pending',created_at=?5,reviewed_at=NULL,reviewed_by=NULL").bind(commentId,visitorId,reason,details,Date.now()).run();
     return jsonResponse({success:true,reported:true});
   } catch(e){ return errorResponse("Failed to submit report",500); }
 }
