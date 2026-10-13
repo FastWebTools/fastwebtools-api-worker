@@ -1,0 +1,16 @@
+{
+  "name": "fastwebtools-status",
+  "main": "status-service.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "services": [
+    { "binding": "ADMIN", "service": "fastwebtools-admin" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "STATUS_DB",
+      "database_name": "fastwebtools-status-db",
+      "database_id": "e0040028-f577-4dce-ad2e-b600daf5f265"
+    }
+  ]
+}
