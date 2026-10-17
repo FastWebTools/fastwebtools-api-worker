@@ -1,0 +1,22 @@
+// Freeze browser JavaScript before Worker bundling can rename its functions.
+import './build-150.mjs';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import upgrade from './viewer-150.mjs';
+const root=new URL('./',import.meta.url),marker='__VIEWER_NONCE__';
+let html=await upgrade('',marker);
+const old="if(changed){lastPayload=payload;render(true)}zone();connection()";
+assert(html.includes(old),'Refresh recovery patch anchor');
+html=html.replace(old,"if(changed||!app.dataset.rendered){render(true);lastPayload=payload;app.dataset.rendered='true'}zone();connection()");
+const fallback="if(!data){const t=document.createElement('template');";
+assert(html.includes(fallback),'First render failure fallback anchor');
+html=html.replace(fallback,"if(!data||!app.dataset.rendered){const t=document.createElement('template');");
+html=html.replace("document.body.dataset.viewerVersion='1.5.0'","document.body.dataset.viewerVersion='1.5.1'");
+const scripts=[...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];assert.equal(scripts.length,1);new vm.Script(scripts[0][1]);
+assert(html.includes('function lastUpdated(){'));assert(html.includes('function toolNames(n){'));
+fs.writeFileSync(new URL('viewer-ready.mjs',root),'// Generated before bundling; never stringify bundled functions.\nconst html='+JSON.stringify(html)+';\nexport default function viewer(_source,nonce){return html.replaceAll('+JSON.stringify(marker)+',nonce)}\n');
+fs.writeFileSync(new URL('viewer.html',root),html.replaceAll(marker,'qatestnonce'));
+let backend=fs.readFileSync(new URL('status-service-150.mjs',root),'utf8');assert(backend.includes("s.viewer_version='1.5.0'"));backend=backend.replace("s.viewer_version='1.5.0'","s.viewer_version='1.5.1'");fs.writeFileSync(new URL('status-service-151.mjs',root),backend);
+console.log('FROZEN_VIEWER_151_BUILT '+createHash('sha256').update(html).digest('hex'));
