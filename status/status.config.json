@@ -4,7 +4,7 @@
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
-  "build": {"command": "node prepare-viewer.mjs && node build-151.mjs"},
+  "build": {"command": "node prepare-viewer.mjs && node build-152.mjs"},
   "services": [{"binding": "ADMIN", "service": "fastwebtools-admin"}],
   "d1_databases": [{"binding": "STATUS_DB", "database_name": "fastwebtools-status-db", "database_id": "e0040028-f577-4dce-ad2e-b600daf5f265"}],
   "triggers": {"crons": ["*/5 * * * *"]},
