@@ -1,0 +1,2 @@
+import previous from './viewer-140.mjs';
+export default async function upgrade(html,nonce){const s=await previous(html,nonce);const old="rich(e.text||'No additional message recorded.')";const replacement="(((!n.branches?.length||n.id==='419c3058-78bc-47ae-a46b-a99ab9c6b85a')&&n.events?.find(x=>x.at===e.at)?.stage)?'<p><b>'+E(n.events.find(x=>x.at===e.at).stage)+'</b></p>':'')+rich(e.text||'No additional message recorded.')";if(!s.includes(old))throw Error('Original event details patch mismatch');return s.replace(old,replacement);}
