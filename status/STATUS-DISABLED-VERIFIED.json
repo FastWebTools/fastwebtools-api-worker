@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-18",
+  "status": "disabled",
+  "publicVerification": "PASS",
+  "verificationBuild": "a62ae47d-5be9-44e3-af8f-70a86fdabb86",
+  "verifiedCommit": "02d6ba4108d7ddf570bc734331e773ef60ed2228",
+  "disabledRoutes": ["/status/", "/status/legacy", "/status/admin", "/status/api/status", "/status/api/admin/snapshot", "/status/api/admin/editor-drafts", "/status/api/auth/login", "Status workers.dev root"],
+  "allDisabledRoutesHttpStatus": 410,
+  "cronSchedules": [],
+  "mainAdminHttpStatus": 200,
+  "originalAdminHtmlSha256": "a28b04273910c86a236d96940b1705e29639aafa101f5fb4ff73341b478a9146",
+  "originalAdminJsSha256": "be78b6f07314dcff640ffc607befe99b36b444b5e8dc523b5602fc9399a2e7b4",
+  "publicHomeHttpStatus": 200,
+  "mainApiVersionHttpStatus": 200,
+  "authAndMainApiDeploymentsUnchanged": true,
+  "productionTestWrites": 0,
+  "realLoginTested": false,
+  "dataDeleted": false,
+  "tursoMigration": "cancelled",
+  "stage3": "cancelled"
+}
